@@ -223,7 +223,7 @@ export default function AudioRecorder({ onSubmit, disabled }: Props) {
       )}
 
       <p className="text-xs text-ink-500">
-        Recordings stay in your browser until you click <em>Generate notes</em>. Audio is sent to OpenAI Whisper for transcription, then GPT-4o for summarization. Files up to 100MB.
+        Recordings stay in your browser until you click <em>Generate notes</em>. Long meetings are compressed and chunked server-side, so multi-hour recordings work. Files up to 500MB.
       </p>
     </div>
   );

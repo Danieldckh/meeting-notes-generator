@@ -1,38 +1,107 @@
-import OpenAI from 'openai';
+import { promises as fs } from 'fs';
+import path from 'path';
+import OpenAI, { toFile } from 'openai';
 import type { TranscriptSegment, TodoItem } from './types';
+import { ffmpegAvailable, prepareAudio, type AudioChunk } from './audio';
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-export async function transcribeAudio(
-  file: File,
-): Promise<{ segments: TranscriptSegment[]; text: string; duration: number; language?: string }> {
-  const result = await client.audio.transcriptions.create({
+const DIRECT_UPLOAD_LIMIT_BYTES = 24 * 1024 * 1024;
+
+type WhisperResult = {
+  text: string;
+  duration?: number;
+  language?: string;
+  segments?: Array<{ id: number; start: number; end: number; text: string }>;
+};
+
+async function transcribeChunkFile(filePath: string, fileName: string): Promise<WhisperResult> {
+  const buffer = await fs.readFile(filePath);
+  const upload = await toFile(buffer, fileName, { type: 'audio/webm' });
+  return (await client.audio.transcriptions.create({
+    file: upload,
+    model: 'whisper-1',
+    response_format: 'verbose_json',
+    timestamp_granularities: ['segment'],
+  })) as unknown as WhisperResult;
+}
+
+async function transcribeFileDirect(file: File): Promise<WhisperResult> {
+  return (await client.audio.transcriptions.create({
     file,
     model: 'whisper-1',
     response_format: 'verbose_json',
     timestamp_granularities: ['segment'],
-  }) as unknown as {
-    text: string;
-    duration?: number;
-    language?: string;
-    segments?: Array<{ id: number; start: number; end: number; text: string }>;
-  };
+  })) as unknown as WhisperResult;
+}
 
-  const segments: TranscriptSegment[] = (result.segments ?? []).map((s) => ({
-    id: s.id,
-    start: s.start,
-    end: s.end,
+function applyOffset(result: WhisperResult, chunk: AudioChunk, idBase: number): TranscriptSegment[] {
+  return (result.segments ?? []).map((s, i) => ({
+    id: idBase + i,
+    start: s.start + chunk.offsetSeconds,
+    end: s.end + chunk.offsetSeconds,
     text: s.text.trim(),
   }));
+}
 
-  return {
-    segments,
-    text: result.text,
-    duration: result.duration ?? segments.at(-1)?.end ?? 0,
-    language: result.language,
-  };
+export async function transcribeAudio(
+  file: File,
+): Promise<{ segments: TranscriptSegment[]; text: string; duration: number; language?: string }> {
+  if (file.size <= DIRECT_UPLOAD_LIMIT_BYTES) {
+    const result = await transcribeFileDirect(file);
+    const segments: TranscriptSegment[] = (result.segments ?? []).map((s) => ({
+      id: s.id,
+      start: s.start,
+      end: s.end,
+      text: s.text.trim(),
+    }));
+    return {
+      segments,
+      text: result.text,
+      duration: result.duration ?? segments.at(-1)?.end ?? 0,
+      language: result.language,
+    };
+  }
+
+  if (!(await ffmpegAvailable())) {
+    throw new Error(
+      `Audio is ${(file.size / 1024 / 1024).toFixed(1)} MB which exceeds OpenAI Whisper's 25 MB limit, and ffmpeg is not available on this server to compress it.`,
+    );
+  }
+
+  const arrayBuf = await file.arrayBuffer();
+  const prepared = await prepareAudio(Buffer.from(arrayBuf), file.type, file.name);
+
+  try {
+    const results = await Promise.all(
+      prepared.chunks.map((c) => transcribeChunkFile(c.path, path.basename(c.path))),
+    );
+
+    let allSegments: TranscriptSegment[] = [];
+    let idBase = 0;
+    const textParts: string[] = [];
+    let language: string | undefined;
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const segs = applyOffset(r, prepared.chunks[i], idBase);
+      allSegments = allSegments.concat(segs);
+      idBase += segs.length;
+      if (r.text?.trim()) textParts.push(r.text.trim());
+      if (!language && r.language) language = r.language;
+    }
+
+    return {
+      segments: allSegments,
+      text: textParts.join(' '),
+      duration: prepared.totalDurationSeconds,
+      language,
+    };
+  } finally {
+    await prepared.cleanup();
+  }
 }
 
 const SYSTEM_PROMPT = `You are an expert meeting note-taker. You will be given a transcript broken into time-stamped segments like:

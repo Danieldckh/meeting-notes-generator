@@ -4,7 +4,7 @@ import { saveMeeting, listMeetings, newId } from '@/lib/storage';
 import type { Meeting } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+export const maxDuration = 900;
 
 export async function GET() {
   const meetings = await listMeetings();
@@ -35,8 +35,8 @@ export async function POST(req: NextRequest) {
   if (audio.size === 0) {
     return NextResponse.json({ error: 'Uploaded audio file is empty.' }, { status: 400 });
   }
-  if (audio.size > 100 * 1024 * 1024) {
-    return NextResponse.json({ error: 'Audio file exceeds 100MB limit.' }, { status: 413 });
+  if (audio.size > 500 * 1024 * 1024) {
+    return NextResponse.json({ error: 'Audio file exceeds 500MB limit.' }, { status: 413 });
   }
 
   try {
